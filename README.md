@@ -2,11 +2,11 @@
 
 This is a JavaScript authentication SDK for Node.js applications that want simple integration with the AuthlyX API.
 
-This folder is primarily for SDK users. The script here is only a reference example to help you integrate faster.
+This folder includes the SDK in `AuthlyX.js` and a runnable example in `main.js`.
 
 ## Requirements
 
-- Node.js 18+ (for built-in `fetch`)
+- Node.js `18+`
 
 ## Install
 
@@ -29,17 +29,11 @@ const AuthlyXApp = new AuthlyX(
 );
 
 await AuthlyXApp.Init();
-if (!AuthlyXApp.response.success) {
-  console.log(AuthlyXApp.response.message);
-  return;
-}
 ```
 
 ## Optional Parameters
 
 ```js
-const { AuthlyX } = require("./AuthlyX");
-
 const AuthlyXApp = new AuthlyX(
   "12345678",
   "MYAPP",
@@ -76,25 +70,20 @@ const AuthlyXApp = new AuthlyX(
 
 All methods return a Promise.
 
-## Init
+## Authentication Example
 
 ```js
-await AuthlyXApp.Init();
+// Username + password
+await AuthlyXApp.Login("username", "password");
 
-if (AuthlyXApp.response.success) {
-  console.log("Init success");
-} else {
-  console.log(AuthlyXApp.response.message);
-}
+// License key only
+await AuthlyXApp.Login("XXXXX-XXXXX-XXXXX-XXXXX-XXXXX");
+
+// Device login
+await AuthlyXApp.Login("YOUR_MOTHERBOARD_ID", null, "motherboard");
 ```
 
-## Login (Unified)
-
-`Login(...)` is a single entry point that supports:
-
-- username/password login
-- license login
-- device login
+## Username Login Example
 
 ```js
 await AuthlyXApp.Login("username", "password");
@@ -108,134 +97,49 @@ if (AuthlyXApp.response.success) {
 }
 ```
 
-### License Login
-
-```js
-await AuthlyXApp.Login("XXXXX-XXXXX-XXXXX-XXXXX-XXXXX");
-
-if (AuthlyXApp.response.success) {
-  console.log("License login success");
-} else {
-  console.log(AuthlyXApp.response.message);
-}
-```
-
-### Device Login (Motherboard)
-
-```js
-await AuthlyXApp.Login("YOUR_MOTHERBOARD_ID", null, "motherboard");
-
-if (AuthlyXApp.response.success) {
-  console.log("Device login success");
-} else {
-  console.log(AuthlyXApp.response.message);
-}
-```
-
-### Device Login (Processor)
-
-```js
-await AuthlyXApp.Login("YOUR_PROCESSOR_ID", null, "processor");
-
-if (AuthlyXApp.response.success) {
-  console.log("Device login success");
-} else {
-  console.log(AuthlyXApp.response.message);
-}
-```
-
-## Register
-
-```js
-await AuthlyXApp.Register("new_user", "password", "XXXXX-XXXXX-XXXXX-XXXXX-XXXXX", "user@example.com");
-
-if (AuthlyXApp.response.success) {
-  console.log("Registered successfully");
-} else {
-  console.log(AuthlyXApp.response.message);
-}
-```
-
-## Extend Time
-
-```js
-await AuthlyXApp.ExtendTime("username", "XXXXX-XXXXX-XXXXX-XXXXX-XXXXX");
-
-if (AuthlyXApp.response.success) {
-  console.log("Extended successfully");
-  console.log("New expiry:", AuthlyXApp.userData.expiryDate);
-} else {
-  console.log(AuthlyXApp.response.message);
-}
-```
-
-## Change Password
-
-```js
-await AuthlyXApp.ChangePassword("old_password", "new_password");
-
-if (AuthlyXApp.response.success) {
-  console.log("Password changed successfully");
-} else {
-  console.log(AuthlyXApp.response.message);
-}
-```
-
-## Variables
+## Variable Example
 
 ```js
 await AuthlyXApp.SetVariable("theme", "dark");
-console.log(AuthlyXApp.response.message);
 
 const value = await AuthlyXApp.GetVariable("theme");
-if (AuthlyXApp.response.success) {
-  console.log("theme =", value);
-} else {
-  console.log(AuthlyXApp.response.message);
-}
+console.log(value);
 ```
 
-## Chats
+## Logging
+
+By default, SDK logging is enabled.
+
+Logs are written to:
+
+`C:\ProgramData\AuthlyX\{AppName}\YYYY_MM_DD.log`
+
+To disable logs:
 
 ```js
-await AuthlyXApp.SendChat("Hello world", "MAIN");
-console.log(AuthlyXApp.response.message);
-
-await AuthlyXApp.GetChats("MAIN");
-if (AuthlyXApp.response.success) {
-  for (const msg of AuthlyXApp.chatMessages.messages) {
-    console.log(`[${msg.createdAt}] ${msg.username}: ${msg.message}`);
-  }
-} else {
-  console.log(AuthlyXApp.response.message);
-}
+const AuthlyXApp = new AuthlyX(
+  "12345678",
+  "MYAPP",
+  "1.0.0",
+  "your-secret",
+  false,
+  "https://authly.cc/api/v2"
+);
 ```
 
-## Validate Session
+Sensitive values such as passwords, secrets, session IDs, request IDs, nonces, license keys, and hashes are masked automatically.
 
-```js
-await AuthlyXApp.ValidateSession();
+## Example Project
 
-if (AuthlyXApp.response.success) {
-  console.log("Session is valid");
-} else {
-  console.log(AuthlyXApp.response.message);
-}
+The runnable example in `main.js` uses the public test app by default for `Init()`.
+
+If you want to run the authenticated example too, set:
+
+- `AUTHLYX_USERNAME`
+- `AUTHLYX_PASSWORD`
+
+Then run:
+
+```powershell
+node main.js
 ```
-
-## User Data
-
-After a successful login, the SDK populates `AuthlyXApp.userData`:
-
-- `username`
-- `email`
-- `licenseKey`
-- `subscription`
-- `subscriptionLevel`
-- `expiryDate`
-- `daysLeft`
-- `lastLogin`
-- `hwid` (this is the Windows SID where available)
-- `ipAddress`
-- `registeredAt`
-

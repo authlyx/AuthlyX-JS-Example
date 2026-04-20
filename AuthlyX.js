@@ -115,6 +115,7 @@ class AuthlyX {
       available: false,
       latestVersion: "",
       downloadUrl: "",
+      autoUpdateEnabled: false,
       forceUpdate: false,
       changelog: "",
       showReminder: false,
@@ -264,9 +265,19 @@ class AuthlyX {
   loadUpdateData(obj) {
     if (!obj || typeof obj !== "object") return;
     const u = obj.update && typeof obj.update === "object" ? obj.update : null;
-    if (!u) return;
+    if (!u) {
+      if ("auto_update_enabled" in obj || "auto_update_download_url" in obj) {
+        this.updateData.available = true;
+        this.updateData.latestVersion = String(obj.server_version || obj.version || "");
+        this.updateData.autoUpdateEnabled = Boolean(obj.auto_update_enabled);
+        this.updateData.downloadUrl = String(obj.auto_update_download_url || "");
+        this.updateData.forceUpdate = Boolean(obj.force_update || false);
+      }
+      return;
+    }
     this.updateData.available = Boolean(u.available || false);
     this.updateData.latestVersion = String(u.latest_version || "");
+    this.updateData.autoUpdateEnabled = Boolean(u.auto_update_enabled);
     this.updateData.downloadUrl = String(u.download_url || "");
     this.updateData.forceUpdate = Boolean(u.force_update || false);
     this.updateData.changelog = String(u.changelog || "");
@@ -364,6 +375,157 @@ class AuthlyX {
     return false;
   }
 
+  compareSemver(current, latest) {
+    const strip = (s) => {
+      const t = String(s || "").trim();
+      const dash = t.indexOf("-");
+      return dash >= 0 ? t.slice(0, dash) : t;
+    };
+    const parse = (s) => {
+      const out = [0, 0, 0];
+      const parts = strip(s).split(".");
+      for (let i = 0; i < out.length && i < parts.length; i++) {
+        const m = String(parts[i]).match(/^\d+/);
+        out[i] = m ? Number(m[0]) : 0;
+      }
+      return out;
+    };
+    const a = parse(current);
+    const b = parse(latest);
+    for (let i = 0; i < 3; i++) {
+      if (a[i] < b[i]) return -1;
+      if (a[i] > b[i]) return 1;
+    }
+    return 0;
+  }
+
+  shouldShowUpdatePrompt(forceShow = false) {
+    if (!this.updateData.available) return false;
+    if (forceShow) return true;
+    if (!this.isClientOutdated()) return false;
+    if (!this.hasWhitelistedUpdateMessage()) return false;
+    return true;
+  }
+
+  openUrl(url) {
+    const u = String(url || "").trim();
+    if (!u) return;
+    try {
+      if (process.platform === "win32") childProcess.exec(`cmd /c start "" "${u}"`);
+      else if (process.platform === "darwin") childProcess.exec(`open "${u}"`);
+      else childProcess.exec(`xdg-open "${u}"`);
+    } catch {
+      return;
+    }
+  }
+
+  isClientOutdated() {
+    if (!this.updateData.latestVersion) return false;
+    return this.compareSemver(this.version, this.updateData.latestVersion) < 0;
+  }
+
+  hasWhitelistedUpdateMessage() {
+    return Boolean(this.updateData.showReminder || String(this.updateData.allowedUntil || "").trim());
+  }
+
+  isAutoUpdateEnabled() {
+    return Boolean(this.updateData.autoUpdateEnabled);
+  }
+
+  formatDisplayDate(rawDate) {
+    const value = String(rawDate || "").trim();
+    if (!value) return value;
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) return value;
+    return parsed.toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
+  }
+
+  buildWhitelistedUpdateMessage() {
+    const allowedUntil = String(this.updateData.allowedUntil || "").trim();
+    const base = allowedUntil
+      ? `A new version is ready, and you can keep using this build until ${this.formatDisplayDate(allowedUntil)}.`
+      : "A new version is ready, and you can still use this build for now.";
+
+    if (!this.isAutoUpdateEnabled()) return base;
+    return `${base}\n\nWould you like to download the latest version now?`;
+  }
+
+  tryShowWindowsMessageBox(message, yesNo) {
+    if (process.platform !== "win32") return null;
+    const escape = (value) => String(value || "").replace(/'/g, "''");
+    const button = yesNo ? "YesNo" : "OK";
+    const script = [
+      "Add-Type -AssemblyName PresentationFramework",
+      `$result = [System.Windows.MessageBox]::Show('${escape(message)}', 'AuthlyX Update', [System.Windows.MessageBoxButton]::${button}, [System.Windows.MessageBoxImage]::Information)`,
+      "Write-Output $result"
+    ].join("; ");
+
+    try {
+      const out = childProcess.spawnSync("powershell", ["-NoProfile", "-Command", script], { encoding: "utf8" });
+      if (out.status === 0) {
+        return String(out.stdout || "").trim();
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  }
+
+  async showRequiredUpdateConsole() {
+    const message = String(this.response.message || "").trim() || "Please update your app to the latest version.";
+    console.log(message);
+
+    const latest = String(this.updateData.latestVersion || "").trim();
+    if (latest) console.log(`Latest version: ${latest}`);
+
+    const downloadUrl = String(this.updateData.downloadUrl || "").trim();
+    if (!this.isAutoUpdateEnabled() || !downloadUrl) return;
+
+    console.log("1. Download Latest");
+    console.log("2. Exit");
+
+    if (!process.stdin || !process.stdin.isTTY) return;
+
+    const readline = require("readline");
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    const answer = await new Promise((resolve) => rl.question("Select an option (1 or 2): ", resolve));
+    rl.close();
+    if (String(answer || "").trim() === "1") this.openUrl(downloadUrl);
+  }
+
+  async promptUpdateIfNeeded(forceShow = false) {
+    if (!this.shouldShowUpdatePrompt(forceShow)) return;
+
+    if (forceShow) {
+      await this.showRequiredUpdateConsole();
+      return;
+    }
+
+    const downloadUrl = String(this.updateData.downloadUrl || "").trim();
+    const msg = this.buildWhitelistedUpdateMessage();
+    const useDownloadPrompt = this.isAutoUpdateEnabled() && !!downloadUrl;
+    const messageResult = this.tryShowWindowsMessageBox(msg, useDownloadPrompt);
+    if (messageResult) {
+      if (useDownloadPrompt && String(messageResult).toLowerCase() === "yes") {
+        this.openUrl(downloadUrl);
+      }
+      return;
+    }
+    AuthlyXLogger.log(`[UPDATE] ${msg.replace(/\n/g, " | ")}`);
+
+    if (!useDownloadPrompt || !process.stdin || !process.stdin.isTTY) {
+      console.log(msg);
+      return;
+    }
+
+    const readline = require("readline");
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    const answer = await new Promise((resolve) => rl.question("Download the latest version now? (Y/N): ", resolve));
+    rl.close();
+    const a = String(answer || "").trim().toLowerCase();
+    if (a === "y" || a === "yes") this.openUrl(downloadUrl);
+  }
+
   async Init(callback = null) {
     const run = async () => {
       if (!this.hasRequiredCredentials()) {
@@ -378,6 +540,7 @@ class AuthlyX {
         hash: this.getCurrentApplicationHash()
       };
       const ok = await this.postJson("init", payload);
+      await this.promptUpdateIfNeeded(String(this.response.code || "").toUpperCase() === "UPDATE_REQUIRED");
       this.initialized = Boolean(ok && this.sessionId);
       return this.initialized;
     };
@@ -671,4 +834,3 @@ class AuthlyX {
 }
 
 module.exports = { AuthlyX, AuthlyXLogger };
-

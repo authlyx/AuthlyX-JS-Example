@@ -30,12 +30,18 @@ function showUser(sdk) {
 }
 
 async function main() {
-  const api = process.env.AUTHLYX_API || "http://localhost:4000/api/v2";
+  const api = process.env.AUTHLYX_API || "https://authly.cc/api/v2";
+  const ownerId = process.env.AUTHLYX_OWNER_ID || "b49d11af8c42";
+  const appName = process.env.AUTHLYX_APP_NAME || "TEST";
+  const version = process.env.AUTHLYX_VERSION || "1.3";
+  const secret = process.env.AUTHLYX_SECRET || "1L0edLKqHlFv0AL3NIQ7uPpikN2ECr7aZSHrNWMo";
+  const username = process.env.AUTHLYX_USERNAME || "";
+  const password = process.env.AUTHLYX_PASSWORD || "";
   const AuthlyXApp = new AuthlyX(
-    "12345678",
-    "HI",
-    "1.3",
-    "qIBFoBJWQH4jaOZr6Sf8BJZyEVnT0LiN4QfRxJGn",
+    ownerId,
+    appName,
+    version,
+    secret,
     true,
     api
   );
@@ -44,31 +50,32 @@ async function main() {
 
   await AuthlyXApp.Init();
   showResult("Init", AuthlyXApp);
+  if (!AuthlyXApp.response.success) return;
 
-  await AuthlyXApp.Login("12", "1");
-  showResult("Login", AuthlyXApp);
-  showUser(AuthlyXApp);
+  if (username && password) {
+    await AuthlyXApp.Login(username, password);
+    showResult("Login", AuthlyXApp);
+    if (AuthlyXApp.response.success) {
+      showUser(AuthlyXApp);
 
-  await AuthlyXApp.SetVariable("hehe", "me");
-  showResult("Set Variable", AuthlyXApp);
+      await AuthlyXApp.SetVariable("theme", "dark");
+      showResult("Set Variable", AuthlyXApp);
 
-  const val = await AuthlyXApp.GetVariable("hehe");
-  showResult("Get Variable", AuthlyXApp);
-  if (AuthlyXApp.response.success) console.log("Value:", val);
+      const val = await AuthlyXApp.GetVariable("theme");
+      showResult("Get Variable", AuthlyXApp);
+      if (AuthlyXApp.response.success) console.log("Value:", val);
 
-  await AuthlyXApp.Login("X6VXY-5VIVE-PT6SY-O8FNX-AEDJL");
-  showResult("License Login", AuthlyXApp);
-  showUser(AuthlyXApp);
+      await AuthlyXApp.ValidateSession();
+      showResult("Validate Session", AuthlyXApp);
+    }
+    return;
+  }
 
-  await AuthlyXApp.Login("PDPCF001X4YJ2Q", null, "motherboard");
-  showResult("Device Login (motherboard)", AuthlyXApp);
-  showUser(AuthlyXApp);
-
-  await AuthlyXApp.ValidateSession();
-  showResult("Validate Session", AuthlyXApp);
+  console.log("");
+  console.log("Init completed.");
+  console.log("Set AUTHLYX_USERNAME and AUTHLYX_PASSWORD if you want to run the authenticated examples.");
 }
 
 main().catch((e) => {
   console.error("Example error:", e && e.message ? e.message : String(e));
 });
-
