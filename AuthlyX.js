@@ -1,3 +1,4 @@
+// AuthlyX SDK Version 2.1
 const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
@@ -62,13 +63,16 @@ class AuthlyXLogger {
 class AuthlyX {
   static DefaultBaseUrl = "https://authly.cc/api/v2";
   static IpLookupUrl = "https://api.ipify.org";
+  static DefaultServerPublicKeyPem = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAgX5lXPhkadeQozyudzTxDXopdJxYexD5qZ0yEq9UOMU=\n-----END PUBLIC KEY-----";
 
-  constructor(ownerId, appName, version, secret, debug = true, api = AuthlyX.DefaultBaseUrl) {
+  constructor(ownerId, appName, version, secret, debug = true, api = AuthlyX.DefaultBaseUrl, serverPublicKeyPem = AuthlyX.DefaultServerPublicKeyPem, requireSignedResponses = false) {
     this.ownerId = ownerId || "";
     this.appName = appName || "";
     this.version = version || "";
     this.secret = secret || "";
     this.baseUrl = String(api || AuthlyX.DefaultBaseUrl).trim().replace(/\/+$/, "");
+    this.serverPublicKeyPem = String(serverPublicKeyPem || AuthlyX.DefaultServerPublicKeyPem).replace(/\\n/g, "\n");
+    this.requireSignedResponses = requireSignedResponses === true;
     this.loggingEnabled = debug === undefined ? true : Boolean(debug);
 
     AuthlyXLogger.AppName = this.appName || "AuthlyX";
@@ -195,6 +199,21 @@ class AuthlyX {
       return { ok: false, code: "AUTH_REQUEST_MISMATCH", message: "Response nonce does not match the original request.", kid };
     }
     return { ok: true, kid };
+  }
+
+  verifySignedResponse(headers, requestId, nonce, canonicalBody) {
+    const signature = headers.get("x-v2-signature") || headers.get("x-auth-signature") || "";
+    const signatureTs = headers.get("x-v2-signature-ts") || "";
+    if (!signature || !signatureTs) return !this.requireSignedResponses;
+    if (!this.serverPublicKeyPem) return !this.requireSignedResponses;
+
+    try {
+      const payload = `${signatureTs}\n${requestId}\n${nonce}\n${canonicalBody}`;
+      const key = crypto.createPublicKey(this.serverPublicKeyPem);
+      return crypto.verify(null, Buffer.from(payload, "utf8"), key, Buffer.from(signature, "base64"));
+    } catch {
+      return false;
+    }
   }
 
   computeDaysLeft(expiryIso) {
@@ -349,6 +368,10 @@ class AuthlyX {
       const meta = this.validateResponseMetadata(headerMap, ctx.requestId, ctx.nonce);
       this.response.signatureKid = meta.kid || "";
       if (!meta.ok) return this.setFailure(meta.code, meta.message, raw, res.status);
+
+      if (!this.verifySignedResponse(headerMap, ctx.requestId, ctx.nonce, this.canonicalJson(obj))) {
+        return this.setFailure("AUTH_INVALID_SIGNATURE", "Response signature verification failed.", raw, res.status);
+      }
 
       this.response.success = "success" in obj ? Boolean(obj.success) : res.ok;
       this.response.code = String(obj.code || "");
