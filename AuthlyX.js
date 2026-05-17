@@ -65,7 +65,7 @@ class AuthlyX {
   static IpLookupUrl = "https://api.ipify.org";
   static DefaultServerPublicKeyPem = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAgX5lXPhkadeQozyudzTxDXopdJxYexD5qZ0yEq9UOMU=\n-----END PUBLIC KEY-----";
 
-  constructor(ownerId, appName, version, secret, debug = true, api = AuthlyX.DefaultBaseUrl, serverPublicKeyPem = AuthlyX.DefaultServerPublicKeyPem, requireSignedResponses = false) {
+  constructor(ownerId, appName, version, secret, debug = true, api = AuthlyX.DefaultBaseUrl, serverPublicKeyPem = AuthlyX.DefaultServerPublicKeyPem, requireSignedResponses = true) {
     this.ownerId = ownerId || "";
     this.appName = appName || "";
     this.version = version || "";
