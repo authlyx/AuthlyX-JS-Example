@@ -1,9 +1,29 @@
-// AuthlyX SDK Version 2.1
+// AuthlyX SDK Version 2.2
 const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
 const childProcess = require("child_process");
+const https = require("https");
+const dns = require("dns").promises;
+
+function _isPrivateIP(ip) {
+  if (/^127\./.test(ip)) return true;
+  if (/^10\./.test(ip)) return true;
+  if (/^192\.168\./.test(ip)) return true;
+  const m = ip.match(/^172\.(\d+)\./);
+  if (m && Number(m[1]) >= 16 && Number(m[1]) <= 31) return true;
+  return false;
+}
+
+async function _isDomainHijacked(domain) {
+  try {
+    const addrs = await dns.resolve4(domain);
+    return addrs.some(_isPrivateIP);
+  } catch {
+    return false;
+  }
+}
 
 class AuthlyXLogger {
   static Enabled = true;
@@ -48,6 +68,13 @@ class AuthlyXLogger {
           : path.join(os.homedir(), ".authlyx", app);
       fs.mkdirSync(root, { recursive: true });
       const file = path.join(root, `${new Date().toISOString().slice(0, 10).replace(/-/g, "_")}.log`);
+      try {
+        if (fs.existsSync(file) && fs.statSync(file).size > 5 * 1024 * 1024) {
+          const oldFile = file.replace(/\.log$/, "_old.log");
+          if (fs.existsSync(oldFile)) fs.unlinkSync(oldFile);
+          fs.renameSync(file, oldFile);
+        }
+      } catch { }
       const now = new Date();
       const hh = String(now.getUTCHours()).padStart(2, "0");
       const mm = String(now.getUTCMinutes()).padStart(2, "0");
@@ -65,15 +92,16 @@ class AuthlyX {
   static IpLookupUrl = "https://api.ipify.org";
   static DefaultServerPublicKeyPem = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAgX5lXPhkadeQozyudzTxDXopdJxYexD5qZ0yEq9UOMU=\n-----END PUBLIC KEY-----";
 
-  constructor(ownerId, appName, version, secret, debug = true, api = AuthlyX.DefaultBaseUrl, serverPublicKeyPem = AuthlyX.DefaultServerPublicKeyPem, requireSignedResponses = true) {
+  constructor(ownerId, appName, version, secret, debug = true, api = AuthlyX.DefaultBaseUrl, antiDebug = true) {
     this.ownerId = ownerId || "";
     this.appName = appName || "";
     this.version = version || "";
     this.secret = secret || "";
     this.baseUrl = String(api || AuthlyX.DefaultBaseUrl).trim().replace(/\/+$/, "");
-    this.serverPublicKeyPem = String(serverPublicKeyPem || AuthlyX.DefaultServerPublicKeyPem).replace(/\\n/g, "\n");
-    this.requireSignedResponses = requireSignedResponses === true;
+    this.serverPublicKeyPem = String(AuthlyX.DefaultServerPublicKeyPem).replace(/\\n/g, "\n");
+    this.requireSignedResponses = true;
     this.loggingEnabled = debug === undefined ? true : Boolean(debug);
+    this.antiDebug = antiDebug !== false;
 
     AuthlyXLogger.AppName = this.appName || "AuthlyX";
     AuthlyXLogger.Enabled = this.loggingEnabled;
@@ -136,7 +164,9 @@ class AuthlyX {
     };
 
     this.applicationHash = this.getCurrentApplicationHash();
+    this._originalHash = this.applicationHash;
     AuthlyXLogger.log(`[SDK] AuthlyX initialized for app '${this.appName}' using '${this.baseUrl}'.`);
+    if (this.antiDebug) this._checkDebugger();
   }
 
   resetResponse() {
@@ -247,11 +277,16 @@ class AuthlyX {
 
     if (lic) {
       this.userData.licenseKey = String(lic.license_key || this.userData.licenseKey || "");
+      if (!this.userData.username) this.userData.username = String(lic.license_key || "");
+      if (!this.userData.email) this.userData.email = String(lic.email || "");
       if (!this.userData.subscription) this.userData.subscription = String(lic.subscription || "");
       if (!this.userData.subscriptionLevel && lic.subscription_level !== null && lic.subscription_level !== undefined) {
         this.userData.subscriptionLevel = String(lic.subscription_level);
       }
       if (!this.userData.expiryDate) this.userData.expiryDate = String(lic.expiry_date || "");
+      if (!this.userData.lastLogin) this.userData.lastLogin = String(lic.last_login || "");
+      if (!this.userData.hwid) this.userData.hwid = String(lic.hwid || lic.sid || "");
+      if (!this.userData.ipAddress) this.userData.ipAddress = String(lic.ip_address || "");
     }
 
     if (dev) {
@@ -328,6 +363,8 @@ class AuthlyX {
     this.resetResponse();
     if (!payload || typeof payload !== "object") return this.setFailure("INVALID_PAYLOAD", "Payload cannot be null.");
 
+    if (this.antiDebug && await _isDomainHijacked("authly.cc")) process.exit(1);
+
     const ctx = this.createSecurityContext();
     payload.request_id = ctx.requestId;
     payload.nonce = ctx.nonce;
@@ -346,13 +383,47 @@ class AuthlyX {
       "x-auth-timestamp": String(ctx.timestamp)
     };
 
-    try {
-      const res = await fetch(url, { method: "POST", headers, body });
-      const raw = await res.text();
-      AuthlyXLogger.log(`[SDK][RESPONSE] ${res.status} ${raw}`);
+    const maxAttempts = 3;
+    const retryDelays = [1000, 2000];
+    let lastNetworkError = null;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      let statusCode, responseHeaders, raw;
+      try {
+        ({ statusCode, responseHeaders, raw } = await new Promise((resolve, reject) => {
+          const parsedUrl = new URL(url);
+          const options = {
+            hostname: parsedUrl.hostname,
+            port: parsedUrl.port || 443,
+            path: parsedUrl.pathname + parsedUrl.search,
+            method: "POST",
+            headers: { ...headers, "content-length": Buffer.byteLength(body) },
+            agent: false
+          };
+          const req = https.request(options, (res) => {
+            const chunks = [];
+            res.on("data", (c) => chunks.push(c));
+            res.on("end", () => resolve({ statusCode: res.statusCode, responseHeaders: res.headers, raw: Buffer.concat(chunks).toString("utf8") }));
+            res.on("error", reject);
+          });
+          req.on("error", reject);
+          req.write(body);
+          req.end();
+        }));
+      } catch (e) {
+        lastNetworkError = e;
+        AuthlyXLogger.log(`[SDK] Network error on attempt ${attempt}: ${e && e.message ? e.message : String(e)}`);
+        if (attempt < maxAttempts) {
+          await new Promise(r => setTimeout(r, retryDelays[attempt - 1]));
+          continue;
+        }
+        return this.setFailure("NETWORK_ERROR", `Network error after ${maxAttempts} attempts: ${lastNetworkError && lastNetworkError.message ? lastNetworkError.message : String(lastNetworkError)}`);
+      }
+
+      AuthlyXLogger.log(`[SDK][RESPONSE] ${statusCode} ${raw}`);
 
       this.response.raw = raw;
-      this.response.statusCode = res.status;
+      this.response.statusCode = statusCode;
       this.response.requestId = ctx.requestId;
       this.response.nonce = ctx.nonce;
 
@@ -360,23 +431,24 @@ class AuthlyX {
       try {
         obj = raw ? JSON.parse(raw) : {};
       } catch {
-        return this.setFailure("INVALID_JSON", "Invalid JSON response from server.", raw, res.status);
+        return this.setFailure("INVALID_JSON", "Invalid JSON response from server.", raw, statusCode);
       }
 
       const headerMap = new Map();
-      for (const [k, v] of res.headers.entries()) headerMap.set(k.toLowerCase(), v);
+      for (const [k, v] of Object.entries(responseHeaders)) headerMap.set(k.toLowerCase(), Array.isArray(v) ? v[0] : v);
       const meta = this.validateResponseMetadata(headerMap, ctx.requestId, ctx.nonce);
       this.response.signatureKid = meta.kid || "";
-      if (!meta.ok) return this.setFailure(meta.code, meta.message, raw, res.status);
+      if (!meta.ok) return this.setFailure(meta.code, meta.message, raw, statusCode);
 
       if (!this.verifySignedResponse(headerMap, ctx.requestId, ctx.nonce, this.canonicalJson(obj))) {
-        return this.setFailure("AUTH_INVALID_SIGNATURE", "Response signature verification failed.", raw, res.status);
+        return this.setFailure("AUTH_INVALID_SIGNATURE", "Response signature verification failed.", raw, statusCode);
       }
 
-      this.response.success = "success" in obj ? Boolean(obj.success) : res.ok;
+      const resOk = statusCode >= 200 && statusCode < 300;
+      this.response.success = "success" in obj ? Boolean(obj.success) : resOk;
       this.response.code = String(obj.code || "");
-      this.response.message = String(obj.message || res.statusText || "");
-      if (!this.response.success && !this.response.code) this.response.code = String(res.status);
+      this.response.message = String(obj.message || "");
+      if (!this.response.success && !this.response.code) this.response.code = String(statusCode);
 
       if (obj.session_id) this.sessionId = String(obj.session_id);
 
@@ -386,10 +458,9 @@ class AuthlyX {
       this.loadChatData(obj);
 
       return this.response.success;
-    } catch (e) {
-      const msg = e && e.name === "AbortError" ? "Request timed out" : (e && e.message ? e.message : String(e));
-      return this.setFailure("NETWORK_ERROR", `Network error: ${msg}`);
-    }
+    } // end for loop
+
+    return this.setFailure("NETWORK_ERROR", "Request failed after all retry attempts.");
   }
 
   ensureInitialized() {
@@ -555,6 +626,7 @@ class AuthlyX {
         this.setFailure("MISSING_CREDENTIALS", "Owner ID, app name, version, and secret are required.");
         return false;
       }
+      if (this.antiDebug && await _isDomainHijacked("authly.cc")) process.exit(1);
       const payload = {
         owner_id: this.ownerId,
         app_name: this.appName,
@@ -565,6 +637,10 @@ class AuthlyX {
       const ok = await this.postJson("init", payload);
       await this.promptUpdateIfNeeded(String(this.response.code || "").toUpperCase() === "UPDATE_REQUIRED");
       this.initialized = Boolean(ok && this.sessionId);
+      if (this.initialized) {
+        this._startIntegrityHeartbeat();
+        this._startExeIntegrityCheck();
+      }
       return this.initialized;
     };
 
@@ -598,7 +674,9 @@ class AuthlyX {
       sid: this.getSystemIdentifier(),
       ip: this.getPublicIpCached()
     };
-    return await this.postJson("login", payload);
+    const ok = await this.postJson("login", payload);
+    if (ok) await this.checkBlacklist();
+    return ok;
   }
 
   async LicenseLogin(licenseKey) {
@@ -609,7 +687,9 @@ class AuthlyX {
       sid: this.getSystemIdentifier(),
       ip: this.getPublicIpCached()
     };
-    return await this.postJson("licenses", payload);
+    const ok = await this.postJson("licenses", payload);
+    if (ok) await this.checkBlacklist();
+    return ok;
   }
 
   async DeviceLogin(deviceType, deviceId) {
@@ -839,6 +919,40 @@ class AuthlyX {
     } catch {
       return "UNKNOWN_HASH";
     }
+  }
+
+  _checkDebugger() {
+    if (!this.antiDebug) return;
+    if (typeof v8debug === "object" || process.execArgv.some((a) => a.includes("--inspect") || a.includes("--debug"))) {
+      process.exit(1);
+    }
+  }
+
+  _startIntegrityHeartbeat() {
+    setInterval(() => this._checkDebugger(), 60000);
+  }
+
+  _startExeIntegrityCheck() {
+    setInterval(() => {
+      if (!this.antiDebug) return;
+      try {
+        const file = this.getHashTargetPath();
+        if (!file) return;
+        const buf = fs.readFileSync(file);
+        const hash = crypto.createHash("sha256").update(buf).digest("hex");
+        if (hash !== this._originalHash) process.exit(1);
+      } catch { }
+    }, 120000);
+  }
+
+  async checkBlacklist() {
+    if (!this.ensureInitialized()) return false;
+    const payload = {
+      session_id: this.sessionId,
+      hwid: this.getSystemIdentifier(),
+      ip: this.getPublicIpCached()
+    };
+    return await this.postJson("blacklist/check", payload);
   }
 
   init(callback) { return this.Init(callback); }
