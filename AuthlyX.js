@@ -1,10 +1,31 @@
-// AuthlyX SDK Version 2.2
+// AuthlyX SDK V2.4
 const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
 const childProcess = require("child_process");
 const https = require("https");
+const tls = require("tls");
+
+
+const pinnedAgent = new https.Agent({
+  rejectUnauthorized: true,
+  maxCachedSessions: 0,
+  checkServerIdentity(host, cert) {
+    const error = tls.checkServerIdentity(host, cert);
+    if (error) return error;
+    if (host.toLowerCase().replace(/\.$/, "") !== "authly.cc") return;
+    const seen = new Set();
+    for (let current = cert; current && !seen.has(current); current = current.issuerCertificate) {
+      seen.add(current);
+      if (!current.raw) continue;
+      const hash = crypto.createHash("sha256").update(current.raw).digest("hex").toUpperCase();
+      if (hash === "1DFC1605FBAD358D8BC844F76D15203FAC9CA5C1A79FD4857FFAF2864FBEBF96" ||
+          hash === "76B27B80A58027DC3CF1DA68DAC17010ED93997D0B603E2FADBE85012493B5A7") return;
+    }
+    return new Error("AuthlyX TLS certificate chain does not match a trusted pin");
+  }
+});
 const dns = require("dns").promises;
 
 function _isPrivateIP(ip) {
@@ -249,7 +270,12 @@ class AuthlyX {
   computeDaysLeft(expiryIso) {
     try {
       if (!expiryIso) return 0;
-      const ms = Date.parse(expiryIso);
+
+
+
+      const hasOffset = /[zZ]|[+-]\d{2}:?\d{2}$/.test(expiryIso);
+      const normalized = hasOffset ? expiryIso : expiryIso.replace(' ', 'T') + 'Z';
+      const ms = Date.parse(normalized);
       if (!Number.isFinite(ms)) return 0;
       const diff = ms - Date.now();
       const days = Math.floor(diff / (24 * 60 * 60 * 1000));
@@ -285,6 +311,7 @@ class AuthlyX {
       }
       if (!this.userData.expiryDate) this.userData.expiryDate = String(lic.expiry_date || "");
       if (!this.userData.lastLogin) this.userData.lastLogin = String(lic.last_login || "");
+      if (!this.userData.registeredAt) this.userData.registeredAt = String(lic.registered_at || lic.date_created || "");
       if (!this.userData.hwid) this.userData.hwid = String(lic.hwid || lic.sid || "");
       if (!this.userData.ipAddress) this.userData.ipAddress = String(lic.ip_address || "");
     }
@@ -304,7 +331,14 @@ class AuthlyX {
     if (!this.userData.hwid) this.userData.hwid = this.getSystemIdentifier();
     if (!this.userData.ipAddress) this.userData.ipAddress = this.getPublicIpCached();
 
-    this.userData.daysLeft = this.computeDaysLeft(this.userData.expiryDate);
+
+
+
+    const rawDaysLeft = obj.days_left ?? user?.days_left ?? lic?.days_left ?? dev?.days_left;
+    const parsedDaysLeft = Number(rawDaysLeft);
+    this.userData.daysLeft = rawDaysLeft !== undefined && rawDaysLeft !== null && !Number.isNaN(parsedDaysLeft)
+      ? parsedDaysLeft
+      : this.computeDaysLeft(this.userData.expiryDate);
   }
 
   loadVariableData(obj) {
@@ -398,7 +432,7 @@ class AuthlyX {
             path: parsedUrl.pathname + parsedUrl.search,
             method: "POST",
             headers: { ...headers, "content-length": Buffer.byteLength(body) },
-            agent: false
+            agent: pinnedAgent
           };
           const req = https.request(options, (res) => {
             const chunks = [];
@@ -458,7 +492,7 @@ class AuthlyX {
       this.loadChatData(obj);
 
       return this.response.success;
-    } // end for loop
+    }
 
     return this.setFailure("NETWORK_ERROR", "Request failed after all retry attempts.");
   }
@@ -627,12 +661,21 @@ class AuthlyX {
         return false;
       }
       if (this.antiDebug && await _isDomainHijacked("authly.cc")) process.exit(1);
+
+
+
+      const ip = await this.getPublicIp();
+      if (ip) {
+        this.cachedPublicIp = ip;
+        this.cachedPublicIpExpiresAt = Date.now() + 10 * 60 * 1000;
+      }
       const payload = {
         owner_id: this.ownerId,
         app_name: this.appName,
         version: this.version,
         secret: this.secret,
-        hash: this.getCurrentApplicationHash()
+        hash: this.getCurrentApplicationHash(),
+        ip
       };
       const ok = await this.postJson("init", payload);
       await this.promptUpdateIfNeeded(String(this.response.code || "").toUpperCase() === "UPDATE_REQUIRED");
